@@ -7,7 +7,7 @@ import {
   RTCSessionDescription,
   mediaDevices,
   MediaStream,
-} from "./webrtc.native";
+} from "./webrtc";
 
 export type PeerConnections = Map<string, RTCPeerConnection>;
 
@@ -33,22 +33,26 @@ export function createSocket(): Socket {
 export async function getLocalAudioStream(): Promise<MediaStream> {
   // On Android, request runtime mic permission if needed
   if (Platform.OS === "android") {
-    const has = await PermissionsAndroid.check(
-      PermissionsAndroid.PERMISSIONS.RECORD_AUDIO
+    const granted = await PermissionsAndroid.request(
+      PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
     );
-    if (!has) {
-      const res = await PermissionsAndroid.request(
-        PermissionsAndroid.PERMISSIONS.RECORD_AUDIO
-      );
-      if (res !== PermissionsAndroid.RESULTS.GRANTED) {
-        throw new Error("Microphone permission denied");
-      }
+    if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
+      throw new Error("Microphone permission denied");
     }
   }
-  const stream = await mediaDevices.getUserMedia({
-    audio: true,
+  const stream = await (mediaDevices as any).getUserMedia({
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    },
     video: false,
   } as any);
+  // Ensure audio tracks are enabled
+  const audioTracks = (stream as any).getAudioTracks?.() || [];
+  for (const t of audioTracks) {
+    try { t.enabled = true; } catch {}
+  }
   return stream as any;
 }
 
