@@ -87,6 +87,28 @@ export class SignalingGateway {
       });
   }
 
+  @SubscribeMessage('chat-message')
+  handleChatMessage(
+    @MessageBody() data: { roomId: string; text: string },
+    @ConnectedSocket() client: Socket,
+  ) {
+    const { roomId, text } = data || ({} as any);
+    if (!roomId || !text || typeof text !== 'string') {
+      return;
+    }
+    const joinedRoomId = this.socketToRoom.get(client.id);
+    if (joinedRoomId !== roomId) {
+      return;
+    }
+    const payload = {
+      roomId,
+      text,
+      fromSocketId: client.id,
+      ts: Date.now(),
+    };
+    this.server.to(roomId).emit('chat-message', payload);
+  }
+
   // Handle unexpected disconnects to avoid leaving stale participants in rooms
   handleDisconnect(client: Socket) {
     const roomId = this.socketToRoom.get(client.id);

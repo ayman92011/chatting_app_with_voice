@@ -24,5 +24,9 @@ export declare class SignalingGateway {
         targetSocketId: string;
         candidate: any;
     }, client: Socket): void;
+    handleChatMessage(data: {
+        roomId: string;
+        text: string;
+    }, client: Socket): void;
     handleDisconnect(client: Socket): void;
 }
