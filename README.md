@@ -40,6 +40,7 @@ Rooms are kept in-memory and automatically removed when all participants leave.
 ### Socket.IO Events
 
 Client → Server:
+
 - `join-room` { roomId }
 - `leave-room` { roomId }
 - `offer` { targetSocketId, offer }
@@ -47,6 +48,7 @@ Client → Server:
 - `ice-candidate` { targetSocketId, candidate }
 
 Server → Client:
+
 - `room-users` { existingParticipantSocketIds }
 - `user-joined` { socketId }
 - `user-left` { socketId }

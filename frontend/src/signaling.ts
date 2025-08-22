@@ -31,27 +31,66 @@ export function createSocket(): Socket {
 }
 
 export async function getLocalAudioStream(): Promise<MediaStream> {
-  // On Android, request runtime mic permission if needed
+  // On Android, request runtime mic permission (and Bluetooth for API 31+ for some headsets)
   if (Platform.OS === "android") {
-    const granted = await PermissionsAndroid.request(
-      PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+    const hasMic = await PermissionsAndroid.check(
+      PermissionsAndroid.PERMISSIONS.RECORD_AUDIO
     );
-    if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
+    let micGranted = hasMic;
+    if (!hasMic) {
+      const res = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.RECORD_AUDIO
+      );
+      micGranted = res === PermissionsAndroid.RESULTS.GRANTED;
+    }
+    if (!micGranted) {
       throw new Error("Microphone permission denied");
     }
+    // Best-effort ask for BLUETOOTH_CONNECT on Android 12+ to allow routing to BT headsets
+    try {
+      const version = (Platform as any).Version as number | string | undefined;
+      const apiLevel =
+        typeof version === "number"
+          ? version
+          : parseInt(String(version || 0), 10);
+      if (!Number.isNaN(apiLevel) && apiLevel >= 31) {
+        const hasBt = await PermissionsAndroid.check(
+          (PermissionsAndroid as any).PERMISSIONS?.BLUETOOTH_CONNECT ||
+            "android.permission.BLUETOOTH_CONNECT"
+        );
+        if (!hasBt) {
+          await PermissionsAndroid.request(
+            (PermissionsAndroid as any).PERMISSIONS?.BLUETOOTH_CONNECT ||
+              "android.permission.BLUETOOTH_CONNECT"
+          );
+        }
+      }
+    } catch {}
   }
-  const stream = await (mediaDevices as any).getUserMedia({
-    audio: {
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true,
-    },
-    video: false,
-  } as any);
+
+  // Use simple constraints on native; detailed constraints on web
+  const isWeb = Platform.OS === "web";
+  const constraints: any = isWeb
+    ? {
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+        video: false,
+      }
+    : {
+        audio: true,
+        video: false,
+      };
+
+  const stream = await (mediaDevices as any).getUserMedia(constraints);
   // Ensure audio tracks are enabled
   const audioTracks = (stream as any).getAudioTracks?.() || [];
-  for (const t of audioTracks) {
-    try { t.enabled = true; } catch {}
+  for (const track of audioTracks) {
+    try {
+      track.enabled = true;
+    } catch {}
   }
   return stream as any;
 }
@@ -59,17 +98,91 @@ export async function getLocalAudioStream(): Promise<MediaStream> {
 export function createPeerConnection(
   onRemoteStream: (stream: MediaStream) => void
 ) {
-  const pc: any = new RTCPeerConnection({
-    iceServers: [
-      { urls: "stun:stun.l.google.com:19302" },
-      { urls: "stun:global.stun.twilio.com:3478?transport=udp" },
-    ],
-  } as any);
+  // Allow optional TURN server configuration via environment variables
+  const turnUrl = (process as any).env?.EXPO_PUBLIC_TURN_URL as
+    | string
+    | undefined;
+  const turnUsername = (process as any).env?.EXPO_PUBLIC_TURN_USERNAME as
+    | string
+    | undefined;
+  const turnCredential = (process as any).env?.EXPO_PUBLIC_TURN_CREDENTIAL as
+    | string
+    | undefined;
+  const forceTurn =
+    String((process as any).env?.EXPO_PUBLIC_FORCE_TURN || "").toLowerCase() ===
+    "true";
+
+  const iceServers: Array<any> = [
+    {
+      urls: [
+        "stun:stun.l.google.com:19302",
+        "stun:stun1.l.google.com:19302",
+        "stun:stun2.l.google.com:19302",
+        "stun:stun3.l.google.com:19302",
+        "stun:stun4.l.google.com:19302",
+      ],
+    },
+  ];
+  if (turnUrl && turnUsername && turnCredential) {
+    iceServers.push({
+      urls: turnUrl,
+      username: turnUsername,
+      credential: turnCredential,
+    });
+  }
+
+  const hasTurn = Boolean(turnUrl && turnUsername && turnCredential);
+  const config: any = { iceServers };
+  if (forceTurn && hasTurn) {
+    (config as any).iceTransportPolicy = "relay";
+  }
+  // Help some browsers by explicitly opting into Unified Plan on web
+  try {
+    if (Platform.OS === "web") {
+      (config as any).sdpSemantics = "unified-plan";
+      (config as any).bundlePolicy = "max-bundle";
+    }
+  } catch {}
+  const pc: any = new RTCPeerConnection(config);
+  try {
+    if (typeof console !== "undefined")
+      console.log("Using ICE servers:", JSON.stringify(config.iceServers));
+    if (typeof console !== "undefined" && (config as any).iceTransportPolicy)
+      console.log("ICE policy:", (config as any).iceTransportPolicy);
+  } catch {}
   pc.ontrack = (event: any) => {
     const [stream] = event.streams;
     if (stream) {
       onRemoteStream(stream);
     }
   };
+  // Fallback for older browsers (Safari < 13, some Firefox versions)
+  try {
+    (pc as any).onaddstream = (event: any) => {
+      const stream = event?.stream || event?.streams?.[0];
+      if (stream) {
+        onRemoteStream(stream);
+      }
+    };
+  } catch {}
+  // Helpful diagnostics
+  try {
+    pc.oniceconnectionstatechange = () => {
+      if (typeof console !== "undefined")
+        console.log("ICE state:", (pc as any).iceConnectionState);
+    };
+    pc.onconnectionstatechange = () => {
+      if (typeof console !== "undefined")
+        console.log("Peer connection state:", (pc as any).connectionState);
+    };
+    pc.onicegatheringstatechange = () => {
+      if (typeof console !== "undefined")
+        console.log("ICE gathering:", (pc as any).iceGatheringState);
+    };
+    (pc as any).onicecandidateerror = (e: any) => {
+      if (typeof console !== "undefined")
+        console.warn("ICE candidate error:", e);
+    };
+  } catch {}
   return pc as any;
 }
