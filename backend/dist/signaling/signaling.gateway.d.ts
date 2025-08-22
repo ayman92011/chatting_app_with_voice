@@ -3,6 +3,7 @@ import { RoomsService } from '../rooms/rooms.service';
 export declare class SignalingGateway {
     private readonly roomsService;
     server: Server;
+    private socketToRoom;
     constructor(roomsService: RoomsService);
     handleJoin(data: {
         roomId: string;
@@ -23,4 +24,5 @@ export declare class SignalingGateway {
         targetSocketId: string;
         candidate: any;
     }, client: Socket): void;
+    handleDisconnect(client: Socket): void;
 }

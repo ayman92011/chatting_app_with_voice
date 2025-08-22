@@ -1,8 +1,8 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Button, StyleSheet, Text, TextInput, View, FlatList } from 'react-native';
 import { createRoom, getRoom, listRooms } from './src/api';
 import { createSocket, getLocalAudioStream, createPeerConnection } from './src/signaling';
-import { MediaStream, RTCIceCandidate, RTCSessionDescription } from 'react-native-webrtc';
+import { MediaStream, RTCIceCandidate, RTCSessionDescription } from './src/webrtc.native';
 
 export default function App() {
 	const [roomId, setRoomId] = useState<string>('');
@@ -11,6 +11,7 @@ export default function App() {
 	const socketRef = useRef<ReturnType<typeof createSocket> | null>(null);
 	const localStreamRef = useRef<MediaStream | null>(null);
 	const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
+	const remoteAudioElsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
 
 	useEffect(() => {
 		refreshRooms();
@@ -49,33 +50,47 @@ export default function App() {
 		}
 
 		setStatus('Requesting microphone and connecting...');
+		try {
+			localStreamRef.current = await getLocalAudioStream();
+		} catch (e: any) {
+			setStatus(`Microphone error: ${e.message ?? e}`);
+			return;
+		}
+
 		const socket = createSocket();
 		socketRef.current = socket;
-
-		localStreamRef.current = await getLocalAudioStream();
 
 		function ensurePeer(remoteSocketId: string) {
 			let pc = peerConnectionsRef.current.get(remoteSocketId);
 			if (!pc) {
-				pc = createPeerConnection((sid, stream) => {
-					// No UI for remote streams in this minimal sample; audio streams auto-play
+				pc = createPeerConnection((stream) => {
+					// On web, attach stream to a hidden audio element
+					if (typeof document !== 'undefined') {
+						let audioEl = remoteAudioElsRef.current.get(remoteSocketId);
+						if (!audioEl) {
+							audioEl = document.createElement('audio');
+							audioEl.autoplay = true;
+							(audioEl as any).playsInline = true;
+							audioEl.style.display = 'none';
+							remoteAudioElsRef.current.set(remoteSocketId, audioEl);
+							document.body.appendChild(audioEl);
+						}
+						(audioEl as any).srcObject = stream as any;
+						try { (audioEl as any).play?.(); } catch { }
+					}
 				});
 				// Attach local audio
-				localStreamRef.current?.getTracks().forEach((track) => pc!.addTrack(track, localStreamRef.current!));
+				localStreamRef.current?.getTracks().forEach((track: any) => (pc as any)!.addTrack(track as any, localStreamRef.current as any));
 
-				pc.onicecandidate = (event) => {
+				pc!.onicecandidate = (event: any) => {
 					if (event.candidate) {
 						socket.emit('ice-candidate', { targetSocketId: remoteSocketId, candidate: event.candidate });
 					}
 				};
 
-				pc.ontrack = (event) => {
-					// Audio stream will play through default output in RN WebRTC once attached to an element if needed.
-				};
-
-				peerConnectionsRef.current.set(remoteSocketId, pc);
+				peerConnectionsRef.current.set(remoteSocketId, pc!);
 			}
-			return pc;
+			return pc!;
 		}
 
 		socket.on('connect', () => {
@@ -91,37 +106,35 @@ export default function App() {
 			setStatus(`Joined room. Peers: ${existingParticipantSocketIds.length}`);
 			for (const remoteSocketId of existingParticipantSocketIds as string[]) {
 				const pc = ensurePeer(remoteSocketId)!;
-				const offer = await pc.createOffer();
-				await pc.setLocalDescription(offer);
+				const offer = await (pc as any).createOffer();
+				await (pc as any).setLocalDescription(offer);
 				socket.emit('offer', { targetSocketId: remoteSocketId, offer });
 			}
 		});
 
 		socket.on('user-joined', async ({ socketId }) => {
 			setStatus(`User joined: ${socketId}`);
-			const pc = ensurePeer(socketId)!;
-			const offer = await pc.createOffer();
-			await pc.setLocalDescription(offer);
-			socket.emit('offer', { targetSocketId: socketId, offer });
+			// Avoid glare: do not create an offer here. The new participant will offer.
+			ensurePeer(socketId);
 		});
 
 		socket.on('offer', async ({ fromSocketId, offer }) => {
 			const pc = ensurePeer(fromSocketId)!;
-			await pc.setRemoteDescription(new RTCSessionDescription(offer));
-			const answer = await pc.createAnswer();
-			await pc.setLocalDescription(answer);
+			await (pc as any).setRemoteDescription(new RTCSessionDescription(offer) as any);
+			const answer = await (pc as any).createAnswer();
+			await (pc as any).setLocalDescription(answer);
 			socket.emit('answer', { targetSocketId: fromSocketId, answer });
 		});
 
 		socket.on('answer', async ({ fromSocketId, answer }) => {
 			const pc = ensurePeer(fromSocketId)!;
-			await pc.setRemoteDescription(new RTCSessionDescription(answer));
+			await (pc as any).setRemoteDescription(new RTCSessionDescription(answer) as any);
 		});
 
 		socket.on('ice-candidate', async ({ fromSocketId, candidate }) => {
 			const pc = ensurePeer(fromSocketId)!;
 			try {
-				await pc.addIceCandidate(new RTCIceCandidate(candidate));
+				await (pc as any).addIceCandidate(new RTCIceCandidate(candidate) as any);
 			} catch (e) {
 				// ignore
 			}
@@ -131,18 +144,37 @@ export default function App() {
 			const pc = peerConnectionsRef.current.get(socketId);
 			pc?.close();
 			peerConnectionsRef.current.delete(socketId);
+			// Remove any audio element
+			if (typeof document !== 'undefined') {
+				const audioEl = remoteAudioElsRef.current.get(socketId);
+				if (audioEl) {
+					try { document.body.removeChild(audioEl); } catch { }
+					remoteAudioElsRef.current.delete(socketId);
+				}
+			}
 		});
 	}
 
 	function cleanup() {
-		peerConnectionsRef.current.forEach((pc) => pc.close());
+		peerConnectionsRef.current.forEach((pc) => (pc as any).close());
 		peerConnectionsRef.current.clear();
 		if (socketRef.current) {
+			try {
+				// Best-effort notify server so it updates room state immediately
+				socketRef.current.emit('leave-room', { roomId });
+			} catch { }
 			socketRef.current.disconnect();
 			socketRef.current = null;
 		}
-		localStreamRef.current?.getTracks().forEach((t) => t.stop());
+		localStreamRef.current?.getTracks().forEach((t: any) => t.stop());
 		localStreamRef.current = null;
+		// Remove audio els
+		if (typeof document !== 'undefined') {
+			remoteAudioElsRef.current.forEach((el) => {
+				try { document.body.removeChild(el); } catch { }
+			});
+			remoteAudioElsRef.current.clear();
+		}
 		setStatus('Left room');
 	}
 

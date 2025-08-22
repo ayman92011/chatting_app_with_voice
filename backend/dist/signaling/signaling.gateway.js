@@ -19,6 +19,7 @@ const rooms_service_1 = require("../rooms/rooms.service");
 let SignalingGateway = class SignalingGateway {
     roomsService;
     server;
+    socketToRoom = new Map();
     constructor(roomsService) {
         this.roomsService = roomsService;
     }
@@ -27,7 +28,10 @@ let SignalingGateway = class SignalingGateway {
         try {
             const { existingParticipantIds } = this.roomsService.addParticipant(roomId, client.id);
             client.join(roomId);
-            client.emit('room-users', { existingParticipantSocketIds: existingParticipantIds });
+            this.socketToRoom.set(client.id, roomId);
+            client.emit('room-users', {
+                existingParticipantSocketIds: existingParticipantIds,
+            });
             client.to(roomId).emit('user-joined', { socketId: client.id });
         }
         catch (err) {
@@ -39,17 +43,33 @@ let SignalingGateway = class SignalingGateway {
         client.leave(roomId);
         this.roomsService.removeParticipant(roomId, client.id);
         client.to(roomId).emit('user-left', { socketId: client.id });
+        this.socketToRoom.delete(client.id);
     }
     handleOffer(data, client) {
-        this.server.to(data.targetSocketId).emit('offer', { fromSocketId: client.id, offer: data.offer });
+        this.server
+            .to(data.targetSocketId)
+            .emit('offer', { fromSocketId: client.id, offer: data.offer });
     }
     handleAnswer(data, client) {
-        this.server.to(data.targetSocketId).emit('answer', { fromSocketId: client.id, answer: data.answer });
+        this.server
+            .to(data.targetSocketId)
+            .emit('answer', { fromSocketId: client.id, answer: data.answer });
     }
     handleIceCandidate(data, client) {
         this.server
             .to(data.targetSocketId)
-            .emit('ice-candidate', { fromSocketId: client.id, candidate: data.candidate });
+            .emit('ice-candidate', {
+            fromSocketId: client.id,
+            candidate: data.candidate,
+        });
+    }
+    handleDisconnect(client) {
+        const roomId = this.socketToRoom.get(client.id);
+        if (roomId) {
+            this.roomsService.removeParticipant(roomId, client.id);
+            client.to(roomId).emit('user-left', { socketId: client.id });
+            this.socketToRoom.delete(client.id);
+        }
     }
 };
 exports.SignalingGateway = SignalingGateway;
