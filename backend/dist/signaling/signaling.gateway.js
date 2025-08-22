@@ -63,6 +63,23 @@ let SignalingGateway = class SignalingGateway {
             candidate: data.candidate,
         });
     }
+    handleChatMessage(data, client) {
+        const { roomId, text } = data || {};
+        if (!roomId || !text || typeof text !== 'string') {
+            return;
+        }
+        const joinedRoomId = this.socketToRoom.get(client.id);
+        if (joinedRoomId !== roomId) {
+            return;
+        }
+        const payload = {
+            roomId,
+            text,
+            fromSocketId: client.id,
+            ts: Date.now(),
+        };
+        this.server.to(roomId).emit('chat-message', payload);
+    }
     handleDisconnect(client) {
         const roomId = this.socketToRoom.get(client.id);
         if (roomId) {
@@ -117,6 +134,14 @@ __decorate([
     __metadata("design:paramtypes", [Object, socket_io_1.Socket]),
     __metadata("design:returntype", void 0)
 ], SignalingGateway.prototype, "handleIceCandidate", null);
+__decorate([
+    (0, websockets_1.SubscribeMessage)('chat-message'),
+    __param(0, (0, websockets_1.MessageBody)()),
+    __param(1, (0, websockets_1.ConnectedSocket)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object, socket_io_1.Socket]),
+    __metadata("design:returntype", void 0)
+], SignalingGateway.prototype, "handleChatMessage", null);
 exports.SignalingGateway = SignalingGateway = __decorate([
     (0, websockets_1.WebSocketGateway)({
         cors: { origin: true, credentials: true },

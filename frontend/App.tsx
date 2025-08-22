@@ -3,15 +3,22 @@ import { Button, StyleSheet, Text, TextInput, View, FlatList } from 'react-nativ
 import { createRoom, getRoom, listRooms } from './src/api';
 import { createSocket, getLocalAudioStream, createPeerConnection } from './src/signaling';
 import { MediaStream, RTCIceCandidate, RTCSessionDescription } from './src/webrtc.native';
+import { monitorStreamLevel, monitorAudioElementLevel } from './src/audioLevel';
 
 export default function App() {
 	const [roomId, setRoomId] = useState<string>('');
 	const [availableRooms, setAvailableRooms] = useState<Array<{ id: string; createdAt: string; participants: number }>>([]);
 	const [status, setStatus] = useState<string>('Idle');
+	const [inRoom, setInRoom] = useState<boolean>(false);
+	const [localLevel, setLocalLevel] = useState<number>(0);
+	const [chatInput, setChatInput] = useState<string>('');
+	const [chatMessages, setChatMessages] = useState<Array<{ from: string; text: string; ts: number }>>([]);
 	const socketRef = useRef<ReturnType<typeof createSocket> | null>(null);
 	const localStreamRef = useRef<MediaStream | null>(null);
 	const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
 	const remoteAudioElsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
+	const remoteLevelStopFnsRef = useRef<Map<string, () => void>>(new Map());
+	const localLevelStopFnRef = useRef<null | (() => void)>(null);
 
 	useEffect(() => {
 		refreshRooms();
@@ -32,6 +39,7 @@ export default function App() {
 			const created = await createRoom();
 			setRoomId(created.id);
 			setStatus(`Room created: ${created.id}`);
+			await joinRoom(created.id);
 		} catch (e: any) {
 			setStatus(`Error: ${e.message}`);
 		}
@@ -42,8 +50,12 @@ export default function App() {
 			setStatus('Enter a room id first');
 			return;
 		}
+		await joinRoom(roomId);
+	}
+
+	async function joinRoom(joinId: string) {
 		try {
-			await getRoom(roomId);
+			await getRoom(joinId);
 		} catch (e: any) {
 			setStatus(`Room not found: ${e.message}`);
 			return;
@@ -52,6 +64,11 @@ export default function App() {
 		setStatus('Requesting microphone and connecting...');
 		try {
 			localStreamRef.current = await getLocalAudioStream();
+			// Start local mic level monitor
+			if (localLevelStopFnRef.current) {
+				try { localLevelStopFnRef.current(); } catch {}
+			}
+			localLevelStopFnRef.current = monitorStreamLevel(localStreamRef.current as any, setLocalLevel);
 		} catch (e: any) {
 			setStatus(`Microphone error: ${e.message ?? e}`);
 			return;
@@ -77,6 +94,16 @@ export default function App() {
 						}
 						(audioEl as any).srcObject = stream as any;
 						try { (audioEl as any).play?.(); } catch { }
+						// Start remote level monitor for this peer
+						const prevStop = remoteLevelStopFnsRef.current.get(remoteSocketId);
+						if (prevStop) { try { prevStop(); } catch {} }
+													const stopFn = monitorAudioElementLevel(audioEl!, (lvl) => {
+								const el: any = remoteAudioElsRef.current.get(remoteSocketId);
+								if (el) {
+									el.__level = lvl;
+								}
+							});
+						remoteLevelStopFnsRef.current.set(remoteSocketId, stopFn);
 					}
 				});
 				// Attach local audio
@@ -95,7 +122,8 @@ export default function App() {
 
 		socket.on('connect', () => {
 			setStatus('Connected to signaling');
-			socket.emit('join-room', { roomId });
+			socket.emit('join-room', { roomId: joinId });
+			setInRoom(true);
 		});
 
 		socket.on('join-error', ({ message }) => {
@@ -144,7 +172,7 @@ export default function App() {
 			const pc = peerConnectionsRef.current.get(socketId);
 			pc?.close();
 			peerConnectionsRef.current.delete(socketId);
-			// Remove any audio element
+			// Remove any audio element and stop level monitor
 			if (typeof document !== 'undefined') {
 				const audioEl = remoteAudioElsRef.current.get(socketId);
 				if (audioEl) {
@@ -152,7 +180,25 @@ export default function App() {
 					remoteAudioElsRef.current.delete(socketId);
 				}
 			}
+			const stop = remoteLevelStopFnsRef.current.get(socketId);
+			if (stop) { try { stop(); } catch {} }
+			remoteLevelStopFnsRef.current.delete(socketId);
 		});
+
+		// Chat
+		socket.on('chat-message', ({ fromSocketId, text, ts }) => {
+			setChatMessages((msgs) => [...msgs, { from: fromSocketId, text, ts }]);
+		});
+	}
+
+	function sendChat() {
+		const text = chatInput.trim();
+		if (!text) return;
+		setChatInput('');
+		try {
+			socketRef.current?.emit('chat-message', { roomId, text });
+			setChatMessages((msgs) => [...msgs, { from: 'me', text, ts: Date.now() }]);
+		} catch {}
 	}
 
 	function cleanup() {
@@ -168,47 +214,109 @@ export default function App() {
 		}
 		localStreamRef.current?.getTracks().forEach((t: any) => t.stop());
 		localStreamRef.current = null;
-		// Remove audio els
+		if (localLevelStopFnRef.current) {
+			try { localLevelStopFnRef.current(); } catch {}
+			localLevelStopFnRef.current = null;
+		}
+		// Remove audio els and stop remote monitors
 		if (typeof document !== 'undefined') {
 			remoteAudioElsRef.current.forEach((el) => {
 				try { document.body.removeChild(el); } catch { }
 			});
 			remoteAudioElsRef.current.clear();
 		}
+		remoteLevelStopFnsRef.current.forEach((stop) => { try { stop(); } catch {} });
+		remoteLevelStopFnsRef.current.clear();
+		setChatMessages([]);
+		setInRoom(false);
 		setStatus('Left room');
 	}
 
 	return (
 		<View style={styles.container}>
-			<Text style={styles.title}>Voice Chat (Socket.IO + WebRTC)</Text>
-			<TextInput
-				style={styles.input}
-				placeholder="Room ID"
-				value={roomId}
-				onChangeText={setRoomId}
-			/>
-			<View style={styles.row}>
-				<Button title="Create Room" onPress={handleCreateRoom} />
-				<View style={{ width: 12 }} />
-				<Button title="Join Room" onPress={handleJoinRoom} />
-				<View style={{ width: 12 }} />
-				<Button title="Leave" onPress={cleanup} />
-			</View>
-			<Text style={styles.status}>{status}</Text>
-			<Button title="Refresh Rooms" onPress={refreshRooms} />
-			<FlatList
-				style={{ marginTop: 12, width: '100%' }}
-				data={availableRooms}
-				keyExtractor={(item) => item.id}
-				renderItem={({ item }) => (
-					<View style={styles.roomItem}>
-						<Text style={{ flex: 1 }}>{item.id}</Text>
-						<Text>{item.participants}/2</Text>
-						<View style={{ width: 8 }} />
-						<Button title="Use" onPress={() => setRoomId(item.id)} />
+			{!inRoom ? (
+				<View style={{ width: '100%' }}>
+					<Text style={styles.title}>Voice Chat (Socket.IO + WebRTC)</Text>
+					<TextInput
+						style={styles.input}
+						placeholder="Room ID"
+						value={roomId}
+						onChangeText={setRoomId}
+					/>
+					<View style={styles.row}>
+						<Button title="Create Room" onPress={handleCreateRoom} />
+						<View style={{ width: 12 }} />
+						<Button title="Join Room" onPress={handleJoinRoom} />
 					</View>
-				)}
-			/>
+					<Text style={styles.status}>{status}</Text>
+					<Button title="Refresh Rooms" onPress={refreshRooms} />
+					<FlatList
+						style={{ marginTop: 12, width: '100%' }}
+						data={availableRooms}
+						keyExtractor={(item) => item.id}
+						renderItem={({ item }) => (
+							<View style={styles.roomItem}>
+								<Text style={{ flex: 1 }}>{item.id}</Text>
+								<Text>{item.participants}/2</Text>
+								<View style={{ width: 8 }} />
+								<Button title="Use" onPress={() => setRoomId(item.id)} />
+							</View>
+						)}
+					/>
+				</View>
+			) : (
+				<View style={{ width: '100%', gap: 12 }}>
+					<Text style={styles.title}>Room {roomId}</Text>
+					<View style={styles.row}>
+						<Button title="Leave" onPress={cleanup} />
+						<View style={{ width: 12 }} />
+						<Text style={styles.status}>{status}</Text>
+					</View>
+					<View>
+						<Text>Your mic level</Text>
+						<View style={{ height: 10, backgroundColor: '#eee', borderRadius: 6, overflow: 'hidden' }}>
+							<View style={{ height: '100%', width: `${Math.round(localLevel * 100)}%`, backgroundColor: localLevel > 0.6 ? '#e74c3c' : localLevel > 0.3 ? '#f1c40f' : '#2ecc71' }} />
+						</View>
+					</View>
+					<View>
+						<Text>Remote audio levels</Text>
+						<FlatList
+							data={Array.from(peerConnectionsRef.current.keys())}
+							keyExtractor={(k) => k}
+							renderItem={({ item }) => {
+								const audioEl = remoteAudioElsRef.current.get(item) as any;
+								const level = (audioEl && audioEl.__level) || 0;
+								return (
+									<View style={{ marginVertical: 6 }}>
+										<Text numberOfLines={1} style={{ fontSize: 12, color: '#555' }}>{item}</Text>
+										<View style={{ height: 8, backgroundColor: '#eee', borderRadius: 6, overflow: 'hidden' }}>
+											<View style={{ height: '100%', width: `${Math.round(level * 100)}%`, backgroundColor: level > 0.6 ? '#e74c3c' : level > 0.3 ? '#f1c40f' : '#2ecc71' }} />
+										</View>
+									</View>
+								);
+							}}
+						/>
+					</View>
+					<View style={{ borderTopColor: '#eee', borderTopWidth: 1, paddingTop: 8 }}>
+						<Text style={{ fontWeight: '600' }}>Chat</Text>
+						<FlatList
+							style={{ height: 200, marginVertical: 8 }}
+							data={chatMessages}
+							keyExtractor={(m, idx) => String(m.ts) + '-' + idx}
+							renderItem={({ item }) => (
+								<Text>
+									{item.from === 'me' ? 'You' : item.from}: {item.text}
+								</Text>
+							)}
+						/>
+						<View style={styles.row}>
+							<TextInput style={[styles.input, { flex: 1 }]} placeholder="Type a message" value={chatInput} onChangeText={setChatInput} />
+							<View style={{ width: 8 }} />
+							<Button title="Send" onPress={sendChat} />
+						</View>
+					</View>
+				</View>
+			)}
 		</View>
 	);
 }
