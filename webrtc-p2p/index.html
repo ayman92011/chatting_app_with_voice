@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WebRTC P2P Audio (Manual Signaling)</title>
+  <style>
+    html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; }
+    .container { max-width: 960px; margin: 0 auto; padding: 16px; }
+    h1 { font-size: 20px; margin: 0 0 8px; }
+    h2 { font-size: 16px; margin: 24px 0 8px; }
+    .cols { display: grid; grid-template-columns: 1fr; gap: 16px; }
+    @media (min-width: 860px) { .cols { grid-template-columns: 1fr 1fr; } }
+    .panel { border: 1px solid #ddd; border-radius: 8px; padding: 12px; }
+    textarea { width: 100%; min-height: 120px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 12px; }
+    button { padding: 8px 12px; margin: 6px 6px 6px 0; cursor: pointer; }
+    .row { margin: 8px 0; }
+    .muted { color: #666; }
+    .status { padding: 8px 12px; background: #f7f7f7; border: 1px solid #eee; border-radius: 6px; font-size: 13px; }
+    .audio { margin-top: 16px; }
+    .small { font-size: 12px; }
+    .ok { color: #0a7c2f; }
+    .warn { color: #a15b00; }
+    .err { color: #a10000; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>WebRTC P2P Audio (Manual Signaling)</h1>
+    <div class="status" id="status">Idle</div>
+
+    <div class="cols">
+      <div class="panel">
+        <h2>Step A (Caller): Create Offer</h2>
+        <div class="row small muted">This side starts the connection. It will ask for microphone permission.</div>
+        <div class="row">
+          <button id="btnOffer">Start mic and create Offer Code</button>
+          <button id="btnCopyOffer" disabled>Copy Offer Code</button>
+        </div>
+        <textarea id="offerOut" placeholder="Your Offer Code will appear here" readonly></textarea>
+        <div class="row small muted">Send this Offer Code to the other device using any channel (chat, QR, etc.).</div>
+
+        <h2>Step C (Caller): Apply Answer</h2>
+        <div class="row small muted">Paste the Answer Code received from the other device, then connect.</div>
+        <textarea id="answerIn" placeholder="Paste Answer Code here"></textarea>
+        <div class="row">
+          <button id="btnApplyAnswer">Apply Answer Code and Connect</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Step B (Callee): Create Answer</h2>
+        <div class="row small muted">This side responds to an offer. It will also ask for microphone permission.</div>
+        <textarea id="offerIn" placeholder="Paste Offer Code here"></textarea>
+        <div class="row">
+          <button id="btnAnswer">Create Answer Code</button>
+          <button id="btnCopyAnswer" disabled>Copy Answer Code</button>
+        </div>
+        <textarea id="answerOut" placeholder="Your Answer Code will appear here" readonly></textarea>
+        <div class="row small muted">Send this Answer Code back to the caller using the same channel.</div>
+      </div>
+    </div>
+
+    <div class="audio">
+      <h2>Remote Audio</h2>
+      <audio id="remoteAudio" autoplay playsinline controls></audio>
+      <div class="small muted">If you do not hear remote audio, check your system/browser permissions and volume. Some browsers require a user gesture before playing audio — pressing any button above should be sufficient.</div>
+    </div>
+
+    <div class="small muted" style="margin-top: 16px;">
+      Notes:
+      <ul>
+        <li>There is no server and no persistent signaling — you copy/paste codes manually.</li>
+        <li>Only STUN (no TURN). If strict NATs prevent a direct path, the connection may fail.</li>
+        <li>Microphone access typically requires HTTPS except on localhost. Use a secure origin when testing across devices.</li>
+      </ul>
+    </div>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    const statusEl = $("status");
+    const btnOffer = $("btnOffer");
+    const btnCopyOffer = $("btnCopyOffer");
+    const offerOut = $("offerOut");
+
+    const answerIn = $("answerIn");
+    const btnApplyAnswer = $("btnApplyAnswer");
+
+    const offerIn = $("offerIn");
+    const btnAnswer = $("btnAnswer");
+    const btnCopyAnswer = $("btnCopyAnswer");
+    const answerOut = $("answerOut");
+
+    const remoteAudio = $("remoteAudio");
+
+    let peerConnection = null;
+    let localStream = null;
+
+    function setStatus(text, type) {
+      statusEl.textContent = text;
+      statusEl.classList.remove("ok", "warn", "err");
+      if (type) statusEl.classList.add(type);
+    }
+
+    function packDescription(desc) {
+      const json = JSON.stringify(desc);
+      const b64 = btoa(json);
+      return b64;
+    }
+
+    function unpackDescription(b64) {
+      try {
+        const json = atob((b64 || "").trim());
+        return JSON.parse(json);
+      } catch (e) {
+        throw new Error("Invalid code: could not decode/parse");
+      }
+    }
+
+    function createPeerConnection() {
+      if (peerConnection) {
+        try { peerConnection.close(); } catch {}
+      }
+
+      peerConnection = new RTCPeerConnection({
+        iceServers: [
+          { urls: [
+            "stun:stun.l.google.com:19302",
+            "stun:stun1.l.google.com:19302",
+            "stun:stun2.l.google.com:19302",
+            "stun:global.stun.twilio.com:3478"
+          ]}
+        ]
+      });
+
+      peerConnection.ontrack = (event) => {
+        const [remoteStream] = event.streams;
+        if (remoteStream) {
+          remoteAudio.srcObject = remoteStream;
+        }
+      };
+
+      peerConnection.oniceconnectionstatechange = () => {
+        setStatus(`ICE: ${peerConnection.iceConnectionState} | PC: ${peerConnection.connectionState}`);
+      };
+
+      peerConnection.onconnectionstatechange = () => {
+        const state = peerConnection.connectionState;
+        if (state === "connected") setStatus("Connected", "ok");
+        else if (state === "failed") setStatus("Connection failed", "err");
+        else setStatus(`State: ${state}`);
+      };
+
+      return peerConnection;
+    }
+
+    async function ensureLocalStream() {
+      if (localStream) return localStream;
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+          },
+          video: false
+        });
+        return localStream;
+      } catch (e) {
+        setStatus("Microphone permission denied or unavailable", "err");
+        throw e;
+      }
+    }
+
+    function addLocalTracks(pc, stream) {
+      stream.getTracks().forEach(track => pc.addTrack(track, stream));
+    }
+
+    function waitForIceGatheringComplete(pc) {
+      if (pc.iceGatheringState === "complete") {
+        return Promise.resolve();
+      }
+      return new Promise((resolve) => {
+        const checkState = () => {
+          if (pc.iceGatheringState === "complete") {
+            pc.removeEventListener("icegatheringstatechange", checkState);
+            resolve();
+          }
+        };
+        pc.addEventListener("icegatheringstatechange", checkState);
+      });
+    }
+
+    async function createOfferFlow() {
+      setStatus("Creating offer…");
+      const pc = createPeerConnection();
+      const stream = await ensureLocalStream();
+      addLocalTracks(pc, stream);
+
+      const offer = await pc.createOffer({ offerToReceiveAudio: true });
+      await pc.setLocalDescription(offer);
+      await waitForIceGatheringComplete(pc);
+
+      const code = packDescription(pc.localDescription);
+      offerOut.value = code;
+      btnCopyOffer.disabled = false;
+      setStatus("Offer ready. Send it to the callee.", "ok");
+    }
+
+    async function applyAnswerFlow() {
+      if (!peerConnection) {
+        setStatus("No PeerConnection. Create an offer first.", "warn");
+        return;
+      }
+      const b64 = answerIn.value.trim();
+      if (!b64) {
+        setStatus("Answer Code is empty.", "warn");
+        return;
+      }
+      try {
+        const desc = unpackDescription(b64);
+        if (desc.type !== "answer") throw new Error("Code is not an answer");
+        await peerConnection.setRemoteDescription(desc);
+        setStatus("Answer applied. Connecting…", "ok");
+      } catch (e) {
+        console.error(e);
+        setStatus(e.message || "Failed to apply answer", "err");
+      }
+    }
+
+    async function createAnswerFlow() {
+      setStatus("Creating answer…");
+      const pc = createPeerConnection();
+
+      const offerB64 = offerIn.value.trim();
+      if (!offerB64) {
+        setStatus("Offer Code is empty.", "warn");
+        return;
+      }
+
+      let offerDesc;
+      try {
+        offerDesc = unpackDescription(offerB64);
+        if (offerDesc.type !== "offer") throw new Error("Code is not an offer");
+      } catch (e) {
+        setStatus(e.message || "Invalid Offer Code", "err");
+        return;
+      }
+
+      const stream = await ensureLocalStream();
+      addLocalTracks(pc, stream);
+
+      await pc.setRemoteDescription(offerDesc);
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      await waitForIceGatheringComplete(pc);
+
+      const code = packDescription(pc.localDescription);
+      answerOut.value = code;
+      btnCopyAnswer.disabled = false;
+      setStatus("Answer ready. Send it back to the caller.", "ok");
+    }
+
+    btnOffer.addEventListener("click", () => createOfferFlow());
+    btnCopyOffer.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(offerOut.value);
+        setStatus("Offer Code copied to clipboard.", "ok");
+      } catch {
+        setStatus("Clipboard copy failed. Select and copy manually.", "warn");
+      }
+    });
+
+    btnApplyAnswer.addEventListener("click", () => applyAnswerFlow());
+
+    btnAnswer.addEventListener("click", () => createAnswerFlow());
+    btnCopyAnswer.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(answerOut.value);
+        setStatus("Answer Code copied to clipboard.", "ok");
+      } catch {
+        setStatus("Clipboard copy failed. Select and copy manually.", "warn");
+      }
+    });
+
+    // Feature detection
+    if (!("RTCPeerConnection" in window)) {
+      setStatus("WebRTC not supported in this browser.", "err");
+    }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setStatus("getUserMedia not supported.", "err");
+    }
+  </script>
+</body>
+</html>
