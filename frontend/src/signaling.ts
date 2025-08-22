@@ -1,6 +1,6 @@
 import io, { Socket } from 'socket.io-client';
 import { BACKEND_URL } from './constants';
-import { RTCPeerConnection, RTCIceCandidate, RTCSessionDescription, mediaDevices, MediaStream } from 'react-native-webrtc';
+import { RTCPeerConnection, RTCIceCandidate, RTCSessionDescription, mediaDevices, MediaStream } from './webrtc';
 
 export type PeerConnections = Map<string, RTCPeerConnection>;
 
@@ -24,22 +24,22 @@ export function createSocket(): Socket {
 }
 
 export async function getLocalAudioStream(): Promise<MediaStream> {
-	const stream = await mediaDevices.getUserMedia({ audio: true, video: false });
-	return stream;
+	const stream = await mediaDevices.getUserMedia({ audio: true, video: false } as any);
+	return stream as any;
 }
 
-export function createPeerConnection(onRemoteStream: (socketId: string, stream: MediaStream) => void) {
+export function createPeerConnection(onRemoteStream: (stream: MediaStream) => void) {
 	const pc = new RTCPeerConnection({
 		iceServers: [
 			{ urls: 'stun:stun.l.google.com:19302' },
 			{ urls: 'stun:global.stun.twilio.com:3478?transport=udp' },
 		],
-	});
-	pc.ontrack = (event) => {
+	} as any);
+	pc.ontrack = (event: any) => {
 		const [stream] = event.streams;
 		if (stream) {
-			// The caller will bind the socketId externally when setting handlers
+			onRemoteStream(stream);
 		}
 	};
-	return pc;
+	return pc as any;
 }
